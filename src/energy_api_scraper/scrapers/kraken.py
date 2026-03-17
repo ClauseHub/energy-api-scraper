@@ -29,6 +29,14 @@ logger = structlog.get_logger()
 # Products to skip (export tariffs, outgoing, etc.)
 SKIP_KEYWORDS = ("EXPORT", "OUTGOING", "FLUX-EXPORT")
 
+# Brand → supplier name mapping for white-label products
+BRAND_SUPPLIER_MAP: dict[str, str] = {
+    "COOP_ENERGY": "Co-op Energy",
+    "LONDON_POWER": "London Power",
+    "SAINSBURYS": "Sainsbury's Energy",
+    "SMART_NEW_CONNECTIONS": "Smart New Connections",
+}
+
 # Preferred payment type to extract (in priority order)
 PREFERRED_PAYMENT_TYPES = [
     "direct_debit_monthly",
@@ -60,27 +68,31 @@ class KrakenScraper(BaseScraper):
         for product in products:
             code = product["code"]
             name = product["display_name"]
+            brand = product.get("brand", "")
             is_variable = product.get("is_variable", False)
 
             # Skip export/outgoing tariffs
             if any(kw in code.upper() for kw in SKIP_KEYWORDS):
                 continue
 
+            # Resolve supplier name from brand (white-labels get own supplier)
+            supplier = BRAND_SUPPLIER_MAP.get(brand, self.supplier_name)
+
             logger.info(
                 "fetching_product",
-                supplier=self.supplier_name,
+                supplier=supplier,
                 code=code,
                 name=name,
             )
 
             try:
-                row = self._fetch_product(code, name, is_variable)
+                row = self._fetch_product(code, name, is_variable, supplier)
                 if row:
                     rows.append(row)
             except Exception:
                 logger.exception(
                     "product_fetch_failed",
-                    supplier=self.supplier_name,
+                    supplier=supplier,
                     code=code,
                 )
 
@@ -101,7 +113,7 @@ class KrakenScraper(BaseScraper):
         return all_products
 
     def _fetch_product(
-        self, code: str, name: str, is_variable: bool
+        self, code: str, name: str, is_variable: bool, supplier: str
     ) -> TariffRow | None:
         """Fetch a single product and return one TariffRow with all regions."""
         resp = httpx.get(f"{self.api_base}/v1/products/{code}/", timeout=30)
@@ -167,7 +179,7 @@ class KrakenScraper(BaseScraper):
         client_id = f"{self.client_id_prefix}-{code}"
 
         return TariffRow(
-            supplier_name=self.supplier_name,
+            supplier_name=supplier,
             tariff_name=name,
             client_tariff_id=client_id,
             consumable_range=consumable_range,
