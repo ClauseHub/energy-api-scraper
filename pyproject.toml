@@ -1,0 +1,40 @@
+[project]
+name = "energy-api-scraper"
+version = "0.1.0"
+description = "Scrapes UK energy supplier TIL data and submits via the ClauseHub Energy API"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27.0",
+    "structlog>=24.4.0",
+    "energy-api-client @ git+https://github.com/ClauseHub/energy-api-client-py.git",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[project.scripts]
+scrape = "energy_api_scraper.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/energy_api_scraper"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4"]
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["energy_api_scraper"]
