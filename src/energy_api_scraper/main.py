@@ -159,14 +159,28 @@ def _create_tariff(
         }
     }
 
+    import time
+
     httpx_client = client.get_httpx_client()
-    resp = httpx_client.post(
-        f"/suppliers/{supplier_id}/tariffs",
-        json=body,
-        headers={"Content-Type": JSONAPI_CT},
-    )
-    if resp.status_code == 201:
-        return True
+    for attempt in range(5):
+        resp = httpx_client.post(
+            f"/suppliers/{supplier_id}/tariffs",
+            json=body,
+            headers={"Content-Type": JSONAPI_CT},
+        )
+        if resp.status_code == 201:
+            return True
+        if resp.status_code == 429:
+            wait = 2**attempt
+            logger.info(
+                "rate_limited",
+                client_id=row.client_tariff_id,
+                wait=wait,
+                attempt=attempt + 1,
+            )
+            time.sleep(wait)
+            continue
+        break
 
     logger.warning(
         "tariff_create_failed",
