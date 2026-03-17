@@ -172,6 +172,27 @@ def _create_tariff(
     return False
 
 
+def _sign_in(supabase_url: str, anon_key: str, email: str, password: str) -> str:
+    """Sign in via Supabase Auth and return a fresh JWT."""
+    import httpx
+
+    resp = httpx.post(
+        f"{supabase_url}/auth/v1/token?grant_type=password",
+        headers={
+            "apikey": anon_key,
+            "Content-Type": "application/json",
+        },
+        json={"email": email, "password": password},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    token = resp.json().get("access_token", "")
+    if not token:
+        raise RuntimeError("Sign-in succeeded but no access_token returned")
+    logger.info("authenticated", email=email)
+    return token
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Scrape TIL data and submit via ClauseHub API"
@@ -182,11 +203,6 @@ def main() -> None:
             "CLAUSEHUB_API_URL", "https://clausehub-energy-api.fly.dev"
         ),
         help="ClauseHub API base URL",
-    )
-    parser.add_argument(
-        "--jwt",
-        default=os.environ.get("CLAUSEHUB_JWT", ""),
-        help="Admin JWT token",
     )
     parser.add_argument(
         "--dry-run",
@@ -210,13 +226,24 @@ def main() -> None:
         logger.info("dry_run", message="Skipping API submission")
         return
 
-    if not args.jwt:
-        logger.error("no_jwt", message="CLAUSEHUB_JWT required")
+    # Authenticate as admin via Supabase Auth
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    anon_key = os.environ.get("SUPABASE_ANON_KEY", "")
+    admin_email = os.environ.get("ADMIN_EMAIL", "")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    if not all([supabase_url, anon_key, admin_email, admin_password]):
+        logger.error(
+            "missing_credentials",
+            message="Set SUPABASE_URL, SUPABASE_ANON_KEY, ADMIN_EMAIL, ADMIN_PASSWORD",
+        )
         sys.exit(1)
+
+    token = _sign_in(supabase_url, anon_key, admin_email, admin_password)
 
     client = AuthenticatedClient(
         base_url=args.api_url,
-        token=args.jwt,
+        token=token,
     )
     supplier_cache: dict[str, str] = {}
     stats = {"created": 0, "failed": 0}

@@ -27,5 +27,8 @@ jobs:
       - name: Scrape and submit via API
         run: uv run scrape
         env:
-          CLAUSEHUB_API_URL: https://clausehub-energy-api.fly.dev
-          CLAUSEHUB_JWT: ${{ secrets.CLAUSEHUB_ADMIN_JWT }}
+          CLAUSEHUB_API_URL: ${{ secrets.CLAUSEHUB_API_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
