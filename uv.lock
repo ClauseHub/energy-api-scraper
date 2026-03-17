@@ -36,7 +36,7 @@ wheels = [
 [[package]]
 name = "energy-api-client"
 version = "0.1.0"
-source = { git = "https://github.com/ClauseHub/energy-api-client-py.git#ddc4eae935397bd871aa802bf362d2f586394f9f" }
+source = { git = "https://github.com/ClauseHub/energy-api-client-py.git#b4b9c7239c8d97aaf6009de312de540e8c5007ac" }
 dependencies = [
     { name = "attrs" },
     { name = "httpx" },

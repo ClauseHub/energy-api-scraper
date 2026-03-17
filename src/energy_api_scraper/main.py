@@ -1,12 +1,13 @@
 """Scrape supplier TIL data and submit via the ClauseHub Energy API client.
 
-Uses the energy-api-client-py library for API communication and
-authentication. Scraped data flows through the same API endpoints
-that any external consumer would use.
+Uses the energy-api-client-py library for authentication and API
+communication. The scraper never talks to Supabase or the database
+directly — all data flows through the ClauseHub API.
 
 Requires:
-    CLAUSEHUB_API_URL  — API base URL (default: https://clausehub-energy-api.fly.dev)
-    CLAUSEHUB_JWT      — Admin JWT token for authentication
+    CLAUSEHUB_API_URL  — API base URL
+    ADMIN_EMAIL        — Scraper service account email
+    ADMIN_PASSWORD     — Scraper service account password
 
 Usage:
     uv run scrape
@@ -18,7 +19,7 @@ import os
 import sys
 
 import structlog
-from energy_api_client import AuthenticatedClient
+from energy_api_client import AuthenticatedClient, login
 from energy_api_client.api.suppliers import list_suppliers_suppliers_get
 
 from energy_api_scraper.scrapers.base import BaseScraper, TariffRow
@@ -58,7 +59,10 @@ def _get_or_create_supplier(
     if name in cache:
         return cache[name]
 
-    response = list_suppliers_suppliers_get.sync_detailed(client=client)
+    # Fetch existing suppliers via generated client
+    response = list_suppliers_suppliers_get.sync_detailed(
+        client=client,
+    )
     if response.status_code.value == 200 and response.parsed:
         data = response.parsed.additional_properties.get("data", [])
         for s in data:
@@ -69,6 +73,7 @@ def _get_or_create_supplier(
             if s_name == name:
                 return s_id
 
+    # Not found — create via httpx (generated client lacks request bodies)
     httpx_client = client.get_httpx_client()
     resp = httpx_client.post(
         "/suppliers",
@@ -109,9 +114,9 @@ def _create_tariff(
                 "value": float(row.elec_rate),
                 "priceUnit": "pence",
                 "consumptionUnit": "kWh",
-                "standingChargeValue": float(row.elec_standing)
-                if row.elec_standing
-                else 0,
+                "standingChargeValue": (
+                    float(row.elec_standing) if row.elec_standing else 0
+                ),
                 "standingChargePriceUnit": "pence",
                 "standingChargePeriod": "per day",
             }
@@ -123,9 +128,9 @@ def _create_tariff(
                 "value": float(row.gas_rate),
                 "priceUnit": "pence",
                 "consumptionUnit": "kWh",
-                "standingChargeValue": float(row.gas_standing)
-                if row.gas_standing
-                else 0,
+                "standingChargeValue": (
+                    float(row.gas_standing) if row.gas_standing else 0
+                ),
                 "standingChargePriceUnit": "pence",
                 "standingChargePeriod": "per day",
             }
@@ -172,24 +177,6 @@ def _create_tariff(
     return False
 
 
-def _sign_in(api_url: str, email: str, password: str) -> str:
-    """Sign in via the ClauseHub API login endpoint."""
-    import httpx
-
-    resp = httpx.post(
-        f"{api_url}/auth/login",
-        json={"email": email, "password": password},
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Login failed: {resp.status_code} {resp.text[:200]}")
-    token = resp.json().get("access_token", "")
-    if not token:
-        raise RuntimeError("Login succeeded but no access_token")
-    logger.info("authenticated", email=email)
-    return token
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Scrape TIL data and submit via ClauseHub API"
@@ -197,7 +184,8 @@ def main() -> None:
     parser.add_argument(
         "--api-url",
         default=os.environ.get(
-            "CLAUSEHUB_API_URL", "https://clausehub-energy-api.fly.dev"
+            "CLAUSEHUB_API_URL",
+            "https://clausehub-energy-api.fly.dev",
         ),
         help="ClauseHub API base URL",
     )
@@ -208,6 +196,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Scrape all suppliers
     all_rows: list[TariffRow] = []
     for scraper in SCRAPERS:
         rows = scraper.run()
@@ -223,23 +212,24 @@ def main() -> None:
         logger.info("dry_run", message="Skipping API submission")
         return
 
-    # Authenticate via the ClauseHub API login endpoint
-    admin_email = os.environ.get("ADMIN_EMAIL", "")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "")
+    # Authenticate via the client library
+    email = os.environ.get("ADMIN_EMAIL", "")
+    password = os.environ.get("ADMIN_PASSWORD", "")
 
-    if not all([admin_email, admin_password]):
+    if not all([email, password]):
         logger.error(
             "missing_credentials",
             message="Set ADMIN_EMAIL and ADMIN_PASSWORD",
         )
         sys.exit(1)
 
-    token = _sign_in(args.api_url, admin_email, admin_password)
-
-    client = AuthenticatedClient(
+    client = login(
         base_url=args.api_url,
-        token=token,
+        email=email,
+        password=password,
     )
+    logger.info("authenticated", email=email)
+
     supplier_cache: dict[str, str] = {}
     stats = {"created": 0, "failed": 0}
 
