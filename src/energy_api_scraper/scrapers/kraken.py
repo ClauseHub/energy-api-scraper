@@ -29,9 +29,6 @@ logger = structlog.get_logger()
 # Products to skip (export tariffs, outgoing, etc.)
 SKIP_KEYWORDS = ("EXPORT", "OUTGOING", "FLUX-EXPORT")
 
-# White-label brands to skip — we only want the primary supplier
-SKIP_BRANDS = ("COOP", "SAINSBURYS", "LP-")
-
 # Preferred payment type to extract (in priority order)
 PREFERRED_PAYMENT_TYPES = [
     "direct_debit_monthly",
@@ -67,10 +64,6 @@ class KrakenScraper(BaseScraper):
 
             # Skip export/outgoing tariffs
             if any(kw in code.upper() for kw in SKIP_KEYWORDS):
-                continue
-
-            # Skip white-label brands
-            if any(code.upper().startswith(b) for b in SKIP_BRANDS):
                 continue
 
             logger.info(
