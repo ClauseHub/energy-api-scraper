@@ -9,25 +9,28 @@ supplier, configured only by the API base URL and supplier name.
 Each product returns TIL-standard data: tariff name, unit rates, standing
 charges, exit fees, and discounts — broken down by PES region and payment
 method.
+
+Products are grouped into one tariff per product with all available
+regions attached. Rates are taken from the first available region
+(London preferred as the reference region).
 """
 
 import httpx
 import structlog
 
-from energy_api_scraper.scrapers.base import OCTOPUS_REGION_MAP, BaseScraper, TariffRow
+from energy_api_scraper.scrapers.base import (
+    OCTOPUS_REGION_MAP,
+    BaseScraper,
+    TariffRow,
+)
 
 logger = structlog.get_logger()
 
-# Products to skip (export tariffs, outgoing, flux export, etc.)
+# Products to skip (export tariffs, outgoing, etc.)
 SKIP_KEYWORDS = ("EXPORT", "OUTGOING", "FLUX-EXPORT")
 
-# Kraken payment type keys → our payment method names
-PAYMENT_TYPE_MAP: dict[str, str] = {
-    "direct_debit_monthly": "Monthly Direct Debit",
-    "direct_debit_quarterly": "Quarterly Direct Debit",
-    "prepayment": "Monthly Cash or Cheque",
-    "varying": "Monthly Direct Debit",  # EDF uses "varying" for DD
-}
+# White-label brands to skip — we only want the primary supplier
+SKIP_BRANDS = ("COOP", "SAINSBURYS", "LP-")
 
 # Preferred payment type to extract (in priority order)
 PREFERRED_PAYMENT_TYPES = [
@@ -35,6 +38,9 @@ PREFERRED_PAYMENT_TYPES = [
     "varying",
     "prepayment",
 ]
+
+# Preferred reference region for rates (London first)
+REFERENCE_REGIONS = ["_C", "_H", "_A", "_B", "_E"]
 
 
 class KrakenScraper(BaseScraper):
@@ -63,6 +69,10 @@ class KrakenScraper(BaseScraper):
             if any(kw in code.upper() for kw in SKIP_KEYWORDS):
                 continue
 
+            # Skip white-label brands
+            if any(code.upper().startswith(b) for b in SKIP_BRANDS):
+                continue
+
             logger.info(
                 "fetching_product",
                 supplier=self.supplier_name,
@@ -71,8 +81,9 @@ class KrakenScraper(BaseScraper):
             )
 
             try:
-                product_rows = self._fetch_product(code, name, is_variable)
-                rows.extend(product_rows)
+                row = self._fetch_product(code, name, is_variable)
+                if row:
+                    rows.append(row)
             except Exception:
                 logger.exception(
                     "product_fetch_failed",
@@ -98,87 +109,115 @@ class KrakenScraper(BaseScraper):
 
     def _fetch_product(
         self, code: str, name: str, is_variable: bool
-    ) -> list[TariffRow]:
+    ) -> TariffRow | None:
+        """Fetch a single product and return one TariffRow with all regions."""
         resp = httpx.get(f"{self.api_base}/v1/products/{code}/", timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
-        rows: list[TariffRow] = []
-
         elec_tariffs = data.get("single_register_electricity_tariffs", {})
         gas_tariffs = data.get("single_register_gas_tariffs", {})
 
+        # Collect all available regions
+        regions: list[tuple[str, str]] = []
         for region_key, (pes_code, area_name) in OCTOPUS_REGION_MAP.items():
             elec_region = elec_tariffs.get(region_key, {})
             gas_region = gas_tariffs.get(region_key, {})
+            if self._pick_payment_type(elec_region) or self._pick_payment_type(
+                gas_region
+            ):
+                regions.append((pes_code, area_name))
 
-            # Find the best available payment type
+        if not regions:
+            return None
+
+        # Pick a reference region for rates (prefer London)
+        ref_data = self._get_reference_rates(elec_tariffs, gas_tariffs)
+        if not ref_data:
+            return None
+
+        elec_data, gas_data = ref_data
+
+        has_elec = bool(elec_data)
+        has_gas = bool(gas_data)
+        if has_elec and has_gas:
+            consumable_range = "Dual"
+        elif has_elec:
+            consumable_range = "Electricity"
+        else:
+            consumable_range = "Gas"
+
+        elec_rate = ""
+        elec_standing = ""
+        exit_fee = ""
+        if has_elec:
+            sr = elec_data.get("standard_unit_rate_inc_vat")
+            sc = elec_data.get("standing_charge_inc_vat")
+            ef = elec_data.get("exit_fees_inc_vat")
+            if sr is not None:
+                elec_rate = f"{sr:.2f}"
+            if sc is not None:
+                elec_standing = f"{sc:.2f}"
+            if ef and ef > 0:
+                exit_fee = f"{ef:.2f}"
+
+        gas_rate = ""
+        gas_standing = ""
+        if has_gas:
+            sr = gas_data.get("standard_unit_rate_inc_vat")
+            sc = gas_data.get("standing_charge_inc_vat")
+            if sr is not None:
+                gas_rate = f"{sr:.2f}"
+            if sc is not None:
+                gas_standing = f"{sc:.2f}"
+
+        client_id = f"{self.client_id_prefix}-{code}"
+
+        return TariffRow(
+            supplier_name=self.supplier_name,
+            tariff_name=name,
+            client_tariff_id=client_id,
+            consumable_range=consumable_range,
+            elec_rate=elec_rate,
+            elec_standing=elec_standing,
+            gas_rate=gas_rate,
+            gas_standing=gas_standing,
+            contract_type="Variable" if is_variable else "Fixed",
+            payment_method="Monthly Direct Debit",
+            exit_fee_value=exit_fee,
+            regions=regions,
+        )
+
+    def _get_reference_rates(
+        self,
+        elec_tariffs: dict,
+        gas_tariffs: dict,
+    ) -> tuple[dict, dict] | None:
+        """Get rates from the best reference region."""
+        for region_key in REFERENCE_REGIONS:
+            elec_region = elec_tariffs.get(region_key, {})
+            gas_region = gas_tariffs.get(region_key, {})
             elec_data = self._pick_payment_type(elec_region)
             gas_data = self._pick_payment_type(gas_region)
+            if elec_data or gas_data:
+                return (elec_data or {}, gas_data or {})
 
-            if not elec_data and not gas_data:
-                continue
+        # Fall back to first available region
+        for region_key in OCTOPUS_REGION_MAP:
+            elec_region = elec_tariffs.get(region_key, {})
+            gas_region = gas_tariffs.get(region_key, {})
+            elec_data = self._pick_payment_type(elec_region)
+            gas_data = self._pick_payment_type(gas_region)
+            if elec_data or gas_data:
+                return (elec_data or {}, gas_data or {})
 
-            has_elec = bool(elec_data)
-            has_gas = bool(gas_data)
-            if has_elec and has_gas:
-                consumable_range = "Dual"
-            elif has_elec:
-                consumable_range = "Electricity"
-            else:
-                consumable_range = "Gas"
-
-            # Extract rates (inc VAT)
-            elec_rate = ""
-            elec_standing = ""
-            exit_fee = ""
-            if has_elec:
-                sr = elec_data.get("standard_unit_rate_inc_vat")
-                sc = elec_data.get("standing_charge_inc_vat")
-                ef = elec_data.get("exit_fees_inc_vat")
-                if sr is not None:
-                    elec_rate = f"{sr:.2f}"
-                if sc is not None:
-                    elec_standing = f"{sc:.2f}"
-                if ef and ef > 0:
-                    exit_fee = f"{ef:.2f}"
-
-            gas_rate = ""
-            gas_standing = ""
-            if has_gas:
-                sr = gas_data.get("standard_unit_rate_inc_vat")
-                sc = gas_data.get("standing_charge_inc_vat")
-                if sr is not None:
-                    gas_rate = f"{sr:.2f}"
-                if sc is not None:
-                    gas_standing = f"{sc:.2f}"
-
-            client_id = f"{self.client_id_prefix}-{code}-{pes_code}"
-
-            row = TariffRow(
-                supplier_name=self.supplier_name,
-                tariff_name=name,
-                client_tariff_id=client_id,
-                consumable_range=consumable_range,
-                elec_rate=elec_rate,
-                elec_standing=elec_standing,
-                gas_rate=gas_rate,
-                gas_standing=gas_standing,
-                contract_type="Variable" if is_variable else "Fixed",
-                payment_method="Monthly Direct Debit",
-                exit_fee_value=exit_fee,
-                regions=[(pes_code, area_name)],
-            )
-            rows.append(row)
-
-        return rows
+        return None
 
     def _pick_payment_type(self, region_data: dict) -> dict | None:
         """Pick the best available payment type from region data."""
         for pt in PREFERRED_PAYMENT_TYPES:
             if pt in region_data:
                 return region_data[pt]
-        # Fall back to first available
         if region_data:
             return next(iter(region_data.values()))
         return None
