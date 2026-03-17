@@ -172,23 +172,20 @@ def _create_tariff(
     return False
 
 
-def _sign_in(supabase_url: str, anon_key: str, email: str, password: str) -> str:
-    """Sign in via Supabase Auth and return a fresh JWT."""
+def _sign_in(api_url: str, email: str, password: str) -> str:
+    """Sign in via the ClauseHub API login endpoint."""
     import httpx
 
     resp = httpx.post(
-        f"{supabase_url}/auth/v1/token?grant_type=password",
-        headers={
-            "apikey": anon_key,
-            "Content-Type": "application/json",
-        },
+        f"{api_url}/auth/login",
         json={"email": email, "password": password},
         timeout=15,
     )
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        raise RuntimeError(f"Login failed: {resp.status_code} {resp.text[:200]}")
     token = resp.json().get("access_token", "")
     if not token:
-        raise RuntimeError("Sign-in succeeded but no access_token returned")
+        raise RuntimeError("Login succeeded but no access_token")
     logger.info("authenticated", email=email)
     return token
 
@@ -226,20 +223,18 @@ def main() -> None:
         logger.info("dry_run", message="Skipping API submission")
         return
 
-    # Authenticate as admin via Supabase Auth
-    supabase_url = os.environ.get("SUPABASE_URL", "")
-    anon_key = os.environ.get("SUPABASE_ANON_KEY", "")
+    # Authenticate via the ClauseHub API login endpoint
     admin_email = os.environ.get("ADMIN_EMAIL", "")
     admin_password = os.environ.get("ADMIN_PASSWORD", "")
 
-    if not all([supabase_url, anon_key, admin_email, admin_password]):
+    if not all([admin_email, admin_password]):
         logger.error(
             "missing_credentials",
-            message="Set SUPABASE_URL, SUPABASE_ANON_KEY, ADMIN_EMAIL, ADMIN_PASSWORD",
+            message="Set ADMIN_EMAIL and ADMIN_PASSWORD",
         )
         sys.exit(1)
 
-    token = _sign_in(supabase_url, anon_key, admin_email, admin_password)
+    token = _sign_in(args.api_url, admin_email, admin_password)
 
     client = AuthenticatedClient(
         base_url=args.api_url,
